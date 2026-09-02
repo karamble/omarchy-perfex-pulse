@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Perfex Pulse setup, run in a floating terminal from the bar widget: store
+# the MCP endpoint and a bearer key with tight permissions after ONE
+# announced verification request, then offer to switch polling on.
+#
+#   perfex-pulse-setup            interactive wizard
+#   perfex-pulse-setup --check    report state without writing anything
+#   perfex-pulse-setup --forget   remove the key, endpoint and caches; polling off
+set -uo pipefail
+
+PLUGIN_ID="karamble.perfex-pulse"
+CONF_DIR="${PERFEX_PULSE_CONF_DIR:-$HOME/.config/perfex-pulse}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/perfex-pulse"
+KEY_FILE="$CONF_DIR/api_key"
+ENDPOINT_FILE="$CONF_DIR/endpoint"
+DEFAULT_ENDPOINT="https://crm.example.com/mcp_connector/mcp"
+
+pause_and_exit() {
+  echo
+  read -n1 -rsp "Press any key to close."
+  exit "$1"
+}
+
+write_secret() {  # DEST CONTENT
+  mkdir -p "$CONF_DIR"
+  if [[ ! -d "$CONF_DIR" || -L "$CONF_DIR" ]]; then
+    echo "Refusing to save: $CONF_DIR is not a real directory."
+    pause_and_exit 1
+  fi
+  chmod 700 "$CONF_DIR"
+  local tmp
+  tmp="$(mktemp -p "$CONF_DIR")"
+  printf '%s\n' "$2" > "$tmp"
+  chmod 600 "$tmp"
+  sync "$tmp" 2>/dev/null
+  mv -f -T "$tmp" "$1"
+}
+
+# probe ENDPOINT KEY -> prints "CODE" and stores the body in PROBE_BODY.
+probe() {
+  local body resp meta
+  body="$(mktemp)"; resp="$(mktemp)"; meta="$(mktemp)"
+  printf '%s' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"invoices_list","arguments":{"limit":1},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' > "$body"
+  curl -sS -g --connect-timeout 5 --max-time 20 -K - \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/call' -H 'Mcp-Name: invoices_list' \
+    -H 'User-Agent: perfex-pulse/1.0 (setup)' \
+    --data-binary @"$body" -o "$resp" -w '%{http_code}' > "$meta" 2>/dev/null \
+    <<<"$(printf 'url = "%s"\nheader = "Authorization: Bearer %s"\n' "$1" "$2")"
+  PROBE_BODY="$(sed -n 's/^data: *//p' "$resp" | tail -n1)"
+  [[ -n "$PROBE_BODY" ]] || PROBE_BODY="$(cat "$resp")"
+  cat "$meta"
+  rm -f "$body" "$resp" "$meta"
+}
+
+case "${1:-}" in
+  --check)
+    echo "Perfex Pulse — state"
+    if [[ -r "$KEY_FILE" ]]; then
+      echo "key file:   $KEY_FILE (perms $(stat -c %a "$KEY_FILE"))"
+    else
+      echo "key file:   missing"
+    fi
+    if [[ -r "$ENDPOINT_FILE" ]]; then
+      echo "endpoint:   $(head -n1 "$ENDPOINT_FILE")"
+    else
+      echo "endpoint:   missing"
+    fi
+    if [[ -r "$CACHE_DIR/last.json" ]]; then
+      echo "last data:  $(date -d "@$(stat -c %Y "$CACHE_DIR/last.json")" '+%F %T')"
+    else
+      echo "last data:  none"
+    fi
+    if [[ -r "$KEY_FILE" && -r "$ENDPOINT_FILE" ]]; then
+      code="$(probe "$(head -n1 "$ENDPOINT_FILE" | tr -d '[:space:]')" "$(head -n1 "$KEY_FILE" | tr -d '[:space:]')")"
+      echo "probe:      HTTP $code"
+    fi
+    exit 0
+    ;;
+  --forget)
+    read -rp "Remove the saved key, endpoint and caches, and switch polling off? [y/N] " answer
+    if [[ "$answer" =~ ^[Yy]$ ]]; then
+      rm -rf "$CONF_DIR" "$CACHE_DIR"
+      omarchy bar set "$PLUGIN_ID" querying false --json >/dev/null 2>&1 || true
+      omarchy-shell -q "$PLUGIN_ID" refresh
+      echo "Forgotten."
+    else
+      echo "Nothing changed."
+    fi
+    exit 0
+    ;;
+esac
+
+echo "Perfex Pulse — setup"
+echo
+echo "This widget reads receivables from your Perfex CRM through its MCP"
+echo "connector. It needs an API key: in Perfex go to Setup → MCP Connector"
+echo "and create a key for a READ-ONLY staff member (view on invoices,"
+echo "payments and customers) — or on the server:"
+echo "  php index.php mcp_connector mcp_cli create_key <staff_id> omarchy-bar"
+echo
+current_endpoint="$DEFAULT_ENDPOINT"
+[[ -r "$ENDPOINT_FILE" ]] && current_endpoint="$(head -n1 "$ENDPOINT_FILE" | tr -d '[:space:]')"
+read -rp "MCP endpoint [$current_endpoint]: " endpoint
+endpoint="${endpoint:-$current_endpoint}"
+endpoint="${endpoint//[[:space:]]/}"
+if ! [[ "$endpoint" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/mcp_connector/mcp$ ]]; then
+  echo "That doesn't look like an MCP connector endpoint (https://host/mcp_connector/mcp)."
+  pause_and_exit 1
+fi
+
+read -rsp "Paste the API key (input is hidden): " key
+echo
+key="${key//[[:space:]]/}"
+if [[ -z "$key" ]]; then
+  echo "Nothing entered — key unchanged."
+  pause_and_exit 1
+fi
+if ! [[ "$key" =~ ^pcm_[0-9a-f]{16,128}$ ]]; then
+  echo "That doesn't look like a connector key (pcm_ followed by hex)."
+  pause_and_exit 1
+fi
+
+echo "Making ONE request to the CRM to verify the key…"
+code="$(probe "$endpoint" "$key")"
+case "$code" in
+  200)
+    if jq -e '.result.structuredContent' >/dev/null 2>&1 <<<"$PROBE_BODY"; then
+      total="$(jq -r '.result.structuredContent.total // 0' <<<"$PROBE_BODY")"
+      echo "OK — the key works (invoices visible to it: $total)."
+      if [[ "$total" == "0" ]]; then
+        echo "Note: zero invoices. If the CRM has invoices, the key's staff member"
+        echo "probably lacks global VIEW on invoices (view_own shows only their own)."
+      fi
+    elif jq -e '.result.isError == true' >/dev/null 2>&1 <<<"$PROBE_BODY"; then
+      echo "The CRM answered with a tool error: $(jq -r '[.result.content[]?.text] | join(" ")' <<<"$PROBE_BODY" | cut -c1-160)"
+      pause_and_exit 1
+    else
+      echo "Unexpected reply from the CRM."
+      pause_and_exit 1
+    fi
+    ;;
+  401) echo "Perfex rejected the key (HTTP 401). Is it the full pcm_… token, not revoked or expired?"; pause_and_exit 1 ;;
+  403) echo "The CRM refused this IP (HTTP 403). Add this machine to the key's IP whitelist, or clear the whitelist."; pause_and_exit 1 ;;
+  000) echo "Could not reach the CRM — check the endpoint and your connection."; pause_and_exit 1 ;;
+  *)   echo "Unexpected response from the CRM (HTTP $code)."; pause_and_exit 1 ;;
+esac
+
+write_secret "$ENDPOINT_FILE" "$endpoint"
+write_secret "$KEY_FILE" "$key"
+echo "Saved to $CONF_DIR (owner-only)."
+echo
+read -rp "Turn polling on now? [Y/n] " answer
+if [[ ! "$answer" =~ ^[Nn]$ ]]; then
+  omarchy bar set "$PLUGIN_ID" querying true --json >/dev/null 2>&1 || echo "(could not switch polling on: omarchy bar set failed — use the panel switch)"
+  sleep 1
+  omarchy-shell -q "$PLUGIN_ID" refresh
+  echo "Polling is on."
+else
+  omarchy-shell -q "$PLUGIN_ID" refresh
+  echo "Polling stays off; flip the switch in the panel when ready."
+fi
+sleep 2

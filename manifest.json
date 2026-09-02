@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "karamble.perfex-pulse",
+  "name": "Perfex Pulse",
+  "version": "1.0.0",
+  "author": "karamble",
+  "license": "MIT",
+  "description": "Outstanding receivables from a Perfex CRM in the bar, with overdue invoices in a click-open panel and a hard on/off switch for polling.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "PerfexPulse.qml" },
+  "barWidget": {
+    "displayName": "Perfex Pulse",
+    "description": "Outstanding receivables, live. Click for overdue invoices; the switch stops every request.",
+    "category": "Finance",
+    "aliases": ["perfex", "crm", "receivables"],
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "querying": false,
+      "pollSeconds": 600,
+      "showAmount": true,
+      "showCents": false,
+      "overdueRows": 5,
+      "paidThisMonth": false,
+      "notifyOverdue": false,
+      "crmUrl": "https://crm.example.com"
+    },
+    "schema": [
+      { "key": "querying", "type": "boolean", "label": "Query the CRM",
+        "description": "Off means the widget makes no network requests at all; the bar shows the greyed mark alone and the panel keeps the last numbers.",
+        "defaultValue": false },
+      { "key": "pollSeconds", "type": "integer", "label": "Poll interval (seconds)",
+        "description": "3 + one call per open invoice per poll. The floor keeps a typo from flooding the audit log.",
+        "min": 120, "max": 3600, "step": 60, "defaultValue": 600 },
+      { "key": "showAmount", "type": "boolean", "label": "Show the amount in the bar",
+        "description": "Off shows the Perfex mark alone; the tooltip and the panel still show the numbers.",
+        "defaultValue": true },
+      { "key": "showCents", "type": "boolean", "label": "Show cents in the bar",
+        "defaultValue": false },
+      { "key": "overdueRows", "type": "integer", "label": "Overdue invoices listed in the panel",
+        "min": 0, "max": 15, "step": 1, "defaultValue": 5 },
+      { "key": "paidThisMonth", "type": "boolean", "label": "Show 'Paid this month' (+1 call per poll)",
+        "defaultValue": false },
+      { "key": "notifyOverdue", "type": "boolean", "label": "Notify when an invoice becomes overdue",
+        "defaultValue": false },
+      { "key": "crmUrl", "type": "string", "label": "CRM base URL (for links)",
+        "description": "Used only to open invoices in the browser. The API endpoint is stored next to the key by the setup wizard.",
+        "defaultValue": "https://crm.example.com" }
+    ]
+  }
+}
